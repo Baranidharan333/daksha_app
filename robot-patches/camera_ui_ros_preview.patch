@@ -1,0 +1,282 @@
+--- a/camera_launch/camera_ui.py
++++ b/camera_launch/camera_ui.py
+@@ -22,13 +22,14 @@
+ guesswork: wiggle a camera, see which live tile moves, drag it into the right
+ slot, Save.
+ 
+-IMPORTANT — run this with the cameras *idle*
+---------------------------------------------
+-A RealSense device can only be opened by one process at a time. Stop the
+-camera bringup (start_all_cameras.launch.py) before using this tool, or the
+-devices will show up in the list (so you still see their serials) but their
+-live preview will report "device busy". After you Save and close this tool,
+-the devices are released and ready for the normal launch.
++While the camera bringup is running
++-----------------------------------
++A RealSense device can only be opened by one process at a time, so while the
++camera bringup (start_all_cameras.launch.py) has a camera open this tool
++can't read it directly. It then shows that camera's picture from the bringup
++instead: the JPEG frames on /<namespace>/<name>/color/image_raw/compressed,
++matched to the camera by the running realsense node's own serial_no
++parameter. Stop the bringup for the direct (lowest-latency) preview.
+ 
+ Run (after sourcing your ROS 2 workspace):
+     pip install flask opencv-python pyrealsense2 pyyaml
+@@ -62,9 +63,10 @@
+     RS_AVAILABLE = False
+     RS_IMPORT_ERROR = str(_e)
+ 
+-# ROS is optional too — this node doesn't publish/subscribe, it just registers
+-# as a ROS 2 node so it shows up in `ros2 node list` and logs through rclpy
+-# like the other operator consoles in this workspace.
++# ROS is optional too. The node registers so it shows up in `ros2 node list`
++# and logs through rclpy like the other operator consoles in this workspace,
++# and it subscribes to the bringup's compressed color topics to preview
++# cameras the bringup is holding (see RosPreview).
+ try:
+     import rclpy
+     from rclpy.node import Node
+@@ -74,6 +76,14 @@
+     ROS_IMPORT_ERROR = str(_e)
+     Node = object
+ 
++try:
++    from rclpy.qos import qos_profile_sensor_data
++    from sensor_msgs.msg import CompressedImage
++    from rcl_interfaces.srv import GetParameters
++    ROS_PREVIEW = ROS_AVAILABLE
++except Exception:  # pragma: no cover
++    ROS_PREVIEW = False
++
+ # --------------------------------------------------------------------------- #
+ # Configuration
+ # --------------------------------------------------------------------------- #
+@@ -82,6 +92,8 @@
+ PREVIEW_HEIGHT = 480
+ PREVIEW_FPS = 30
+ JPEG_QUALITY = 70
++ROS_FRAME_MAX_AGE = 2.0              # s; older bringup frames count as no picture
++ROS_REFRESH_PERIOD = 5.0             # s; re-read topics and ask nodes their serial
+ 
+ # Default serial per role. These are the node's <role>_serial parameter
+ # defaults; override at launch without editing this file, e.g.:
+@@ -250,6 +262,11 @@
+             except Exception:
+                 pass
+ 
++    @property
++    def finished(self):
++        """The grab thread has ended (the camera was busy or failed)."""
++        return not self._thread.is_alive()
++
+     def stop(self):
+         # Join the grab thread so the pipeline is fully stopped before the
+         # RealSense context is torn down -- otherwise librealsense can abort
+@@ -275,9 +292,12 @@
+         except Exception:
+             return default
+ 
+-    def scan(self):
++    def scan(self, retry_busy=False):
+         """Enumerate connected RealSense devices, (re)start streamers for new
+-        ones, drop streamers for devices that went away."""
++        ones, drop streamers for devices that went away. With retry_busy (the
++        Rescan button), also try again to open cameras that were busy, e.g.
++        after the bringup stopped. Never automatically: a camera this tool
++        holds is one a bringup started afterwards can't open."""
+         if not RS_AVAILABLE:
+             return []
+         found = {}
+@@ -302,6 +322,8 @@
+             for serial in found:
+                 if serial not in self._streamers:
+                     self._streamers[serial] = CameraStreamer(serial, self._ctx)
++                elif retry_busy and self._streamers[serial].finished:
++                    self._streamers[serial] = CameraStreamer(serial, self._ctx)
+             # Tear down streamers whose device unplugged.
+             for serial in list(self._streamers):
+                 if serial not in found:
+@@ -314,7 +336,14 @@
+             for serial, meta in self._devices.items():
+                 streamer = self._streamers.get(serial)
+                 status, detail = streamer.status if streamer else ("error", "")
+-                out.append({**meta, "status": status, "detail": detail})
++                source = "device" if status == "live" else None
++                if status == "busy":
++                    _, node_name = ros_frame(serial)
++                    if node_name:
++                        status, source = "live", "ros"
++                        detail = (f"Live view from the bringup's {node_name} node "
++                                  "(the bringup has this camera open).")
++                out.append({**meta, "status": status, "detail": detail, "source": source})
+             return out
+ 
+     def streamer(self, serial):
+@@ -480,7 +509,9 @@
+ @app.route('/api/scan')
+ def api_scan():
+     if manager:
+-        manager.scan()                 # refresh device set / streamers
++        # refresh device set / streamers; ?rescan=1 (the Rescan button) also
++        # retries cameras that were busy
++        manager.scan(retry_busy=request.args.get('rescan') == '1')
+         devices = manager.devices()    # status-enriched view
+     else:
+         devices = []
+@@ -568,6 +599,8 @@
+         while True:
+             streamer = manager.streamer(serial) if manager else None
+             frame = streamer.latest_jpeg() if streamer else None
++            if frame is None and streamer is not None:
++                frame, _ = ros_frame(serial)    # busy: the bringup's picture
+             if frame is None:
+                 if streamer is None:
+                     frame = _placeholder_jpeg("camera not connected")
+@@ -587,9 +620,95 @@
+                     mimetype='multipart/x-mixed-replace; boundary=frame')
+ 
+ 
++def camera_nodes():
++    """Bringup camera nodes per cameras.yaml, named the way
++    start_all_cameras.launch.py names them: [(node, compressed color topic)]."""
++    out = []
++    try:
++        with open(CAMERAS_YAML) as f:
++            cfg = yaml.safe_load(f) or {}
++        for key, cam in (cfg.get('cameras') or {}).items():
++            if not cam or not cam.get('enabled', True):
++                continue
++            node = f"/{cam.get('namespace', key)}/{cam.get('name', 'camera')}"
++            out.append((node, f"{node}/color/image_raw/compressed"))
++    except Exception:
++        pass
++    return out
++
++
++def ros_frame(serial):
++    """(latest JPEG, node name) for the camera with this bare serial from the
++    running bringup, or (None, None) if there's no fresh frame."""
++    if _node is None:
++        return None, None
++    return _node.preview.frame(serial)
++
++
++class RosPreview:
++    """Keeps the newest bringup frame of every camera node, and the serial each
++    node actually opened (its serial_no parameter, which can differ from
++    cameras.yaml if the file changed after the bringup started)."""
++
++    def __init__(self, node):
++        self._node = node
++        self._lock = threading.Lock()
++        self._frames = {}         # node name -> (jpeg bytes, monotonic time)
++        self._serials = {}        # node name -> bare serial it opened
++        self._subs = {}           # node name -> subscription
++        self._clients = {}        # node name -> GetParameters client
++        self.refresh()
++        node.create_timer(ROS_REFRESH_PERIOD, self.refresh)
++
++    def refresh(self):
++        for name, topic in camera_nodes():
++            if name not in self._subs:
++                self._subs[name] = self._node.create_subscription(
++                    CompressedImage, topic,
++                    lambda msg, name=name: self._on_frame(name, msg),
++                    qos_profile_sensor_data)
++            self._ask_serial(name)
++
++    def _on_frame(self, name, msg):
++        if 'jpeg' not in msg.format.lower() and 'jpg' not in msg.format.lower():
++            return                    # the page shows JPEG only
++        with self._lock:
++            self._frames[name] = (bytes(msg.data), time.monotonic())
++
++    def _ask_serial(self, name):
++        client = self._clients.get(name)
++        if client is None:
++            client = self._clients[name] = self._node.create_client(
++                GetParameters, f"{name}/get_parameters")
++        if not client.service_is_ready():
++            return                    # bringup not running; keep what we knew
++        request = GetParameters.Request()
++        request.names = ['serial_no']
++        future = client.call_async(request)
++        future.add_done_callback(lambda f, name=name: self._got_serial(name, f))
++
++    def _got_serial(self, name, future):
++        try:
++            serial = norm_serial(future.result().values[0].string_value)
++        except Exception:
++            return
++        if serial:
++            with self._lock:
++                self._serials[name] = serial
++
++    def frame(self, serial):
++        now = time.monotonic()
++        with self._lock:
++            for name, node_serial in self._serials.items():
++                jpeg, stamp = self._frames.get(name, (None, 0))
++                if node_serial == serial and jpeg and now - stamp < ROS_FRAME_MAX_AGE:
++                    return jpeg, name
++        return None, None
++
++
+ # --------------------------------------------------------------------------- #
+-# ROS 2 node: declares the per-role camera serial parameters (with defaults)
+-# and provides logging. main() reads the serials back to seed the slots.
++# ROS 2 node: declares the per-role camera serial parameters (with defaults),
++# provides logging, and previews cameras the bringup holds (RosPreview).
+ # --------------------------------------------------------------------------- #
+ class CameraUINode(Node):
+     def __init__(self):
+@@ -597,6 +716,7 @@
+         # Runtime parameters — override at launch with `--ros-args -p name:=value`.
+         for role in ROLE_KEYS:
+             self.declare_parameter(f'{role}_serial', DEFAULT_SERIALS.get(role, ''))
++        self.preview = RosPreview(self) if ROS_PREVIEW else _NoPreview()
+ 
+     def serials(self):
+         """role_key -> bare serial from the <role>_serial parameters."""
+@@ -604,6 +724,25 @@
+                 for role in ROLE_KEYS}
+ 
+ 
++class _NoPreview:
++    def frame(self, serial):
++        return None, None
++
++
++def seed_assignments():
++    """Starting slots: a <role>_serial parameter set at launch, else what
++    cameras.yaml holds, else the built-in default. (Seeding from the defaults
++    alone showed stale serials after every restart, despite a Save.)"""
++    saved = read_assignments()
++    params = _node.serials() if _node is not None else {}
++    seed = {}
++    for role in ROLE_KEYS:
++        default = norm_serial(DEFAULT_SERIALS.get(role)) or None
++        explicit = params.get(role) if params.get(role) != default else None
++        seed[role] = explicit or saved.get(role) or default
++    return seed
++
++
+ _node = None
+ _cleanup_lock = threading.Lock()
+ _cleaned = False
+@@ -679,14 +818,8 @@
+             pass
+ 
+     manager = DeviceManager(logger=log)
+-    # Seed the editable slots from the node's <role>_serial parameters (or the
+-    # DEFAULT_SERIALS when running without ROS).
+-    if _node is not None:
+-        seed = _node.serials()
+-    else:
+-        seed = {r: norm_serial(DEFAULT_SERIALS.get(r)) for r in ROLE_KEYS}
+     with assign_lock:
+-        assignments.update(seed)
++        assignments.update(seed_assignments())
+     manager.scan()
+ 
+     host = socket.gethostname().lower()

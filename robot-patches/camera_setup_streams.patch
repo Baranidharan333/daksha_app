@@ -1,0 +1,91 @@
+--- a/static/js/app.js
++++ b/static/js/app.js
+@@ -7,6 +7,19 @@
+ const el = (id) => document.getElementById(id);
+ const streamURL = (serial) => `/stream/${serial}?t=${Date.now()}`;
+ 
++// MJPEG streams never end, and a browser keeps at most 6 connections open per
++// server, so every stream past that makes scan/assign/save wait in a queue.
++// Only live cameras stream, once each: tiles hold the streams, and role slots
++// copy frames from their tile (mirrorSlots) instead of opening their own.
++function setStream(img, serial) {
++  const want = serial || '';
++  if (img.dataset.stream === want) return;
++  img.dataset.stream = want;
++  img.hidden = !serial;
++  if (serial) img.src = streamURL(serial);
++  else img.removeAttribute('src');   // closes the connection
++}
++
+ function toast(msg, kind) {
+   const t = el('toast');
+   t.textContent = msg;
+@@ -35,7 +48,9 @@
+     <div class="feed">
+       <span class="pill"></span>
+       <span class="usb"></span>
+-      <img src="${streamURL(d.serial)}" alt="feed">
++      <span class="feed-note" style="position:absolute; inset:0; display:flex; align-items:center;
++        padding:0 12px; color:#d9b38c; font-size:13px"></span>
++      <img alt="feed" hidden>
+     </div>
+     <div class="meta">
+       <div class="name"></div>
+@@ -70,6 +85,10 @@
+     const pill = card.querySelector('.pill');
+     pill.className = 'pill ' + st;
+     pill.textContent = st === 'live' ? 'live' : st;
++    setStream(card.querySelector('.feed img'), st === 'live' ? d.serial : null);
++    card.querySelector('.feed-note').textContent =
++      st === 'live' ? '' : (st === 'busy' ? 'device busy' : st);
++    card.querySelector('.feed-note').title = d.detail || '';
+     card.querySelector('.usb').textContent = 'USB ' + (d.usb || '?');
+     card.querySelector('.name').textContent = d.name || 'RealSense';
+     card.querySelector('.serial').textContent = d.serial;
+@@ -96,8 +115,8 @@
+       drop.classList.add('filled');
+       empty.hidden = true;
+       img.hidden = false;
+-      if (img.dataset.serial !== serial) {   // only (re)load when it changes
+-        img.src = streamURL(serial);
++      if (img.dataset.serial !== serial) {   // mirrorSlots fills in the frames
++        img.removeAttribute('src');
+         img.dataset.serial = serial;
+       }
+       const dev = DEVICES.find((d) => d.serial === serial);
+@@ -113,6 +132,27 @@
+   }
+ }
+ 
++// Copies the current frame of each assigned camera's tile into its slot
++// thumbnail, so a slot never opens a second stream for the same camera.
++const mirrorCanvas = document.createElement('canvas');
++function mirrorSlots() {
++  for (const r of ROLES) {
++    const img = document.querySelector(`#slot-${r.key} .slot-feed`);
++    const serial = ASSIGN[r.key];
++    const tile = serial && document.querySelector(`.dev[data-serial="${serial}"] .feed img`);
++    if (!img || !tile || !tile.dataset.stream || !tile.naturalWidth) {
++      if (img && img.getAttribute('src')) img.removeAttribute('src');
++      continue;
++    }
++    mirrorCanvas.width = 168;
++    mirrorCanvas.height = Math.round(168 * tile.naturalHeight / tile.naturalWidth);
++    try {
++      mirrorCanvas.getContext('2d').drawImage(tile, 0, 0, mirrorCanvas.width, mirrorCanvas.height);
++      img.src = mirrorCanvas.toDataURL('image/jpeg', 0.7);
++    } catch (e) { /* frame not ready yet */ }
++  }
++}
++
+ // --- drag & drop on slots ---------------------------------------------- //
+ function wireSlots() {
+   document.querySelectorAll('.slot-drop').forEach((drop) => {
+@@ -190,6 +230,7 @@
+ // --- boot -------------------------------------------------------------- //
+ wireSlots();
+ scan();
++setInterval(mirrorSlots, 500);
+ // Light background refresh so live/busy status pills stay current without
+ // reloading the already-running MJPEG <img> streams.
+ setInterval(async () => {

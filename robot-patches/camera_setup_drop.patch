@@ -1,0 +1,31 @@
+--- a/static/js/app.js	2026-10-22 17:58:16.953428115 +0530
++++ b/static/js/app.js	2026-10-22 17:58:16.974291036 +0530
+@@ -114,19 +114,23 @@
+ }
+ 
+ // --- drag & drop on slots ---------------------------------------------- //
++// The whole role row accepts a drop, not just its thumbnail box.
+ function wireSlots() {
+-  document.querySelectorAll('.slot-drop').forEach((drop) => {
+-    drop.addEventListener('dragover', (e) => {
++  document.querySelectorAll('.slot').forEach((slot) => {
++    const drop = slot.querySelector('.slot-drop');
++    slot.addEventListener('dragover', (e) => {
+       e.preventDefault();
+       e.dataTransfer.dropEffect = 'move';
+       drop.classList.add('over');
+     });
+-    drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+-    drop.addEventListener('drop', (e) => {
++    slot.addEventListener('dragleave', (e) => {
++      if (!slot.contains(e.relatedTarget)) drop.classList.remove('over');
++    });
++    slot.addEventListener('drop', (e) => {
+       e.preventDefault();
+       drop.classList.remove('over');
+       const serial = e.dataTransfer.getData('text/plain');
+-      if (serial) assign(drop.dataset.role, serial);
++      if (serial) assign(slot.dataset.role, serial);
+     });
+   });
+ }

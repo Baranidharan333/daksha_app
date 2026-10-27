@@ -1,0 +1,25 @@
+--- a/static/js/app.js
++++ b/static/js/app.js
+@@ -210,9 +210,11 @@
+ 
+ function clearSlot(role) { assign(role, ''); }
+ 
+-async function scan() {
++// retryBusy (the Rescan button) asks the server to try busy cameras again,
++// e.g. after the camera bringup was stopped.
++async function scan(retryBusy) {
+   try {
+-    const res = await fetch('/api/scan');
++    const res = await fetch(retryBusy ? '/api/scan?rescan=1' : '/api/scan');
+     const data = await res.json();
+     takeScan(data);
+     DEVICES = data.devices || [];
+@@ -230,7 +232,7 @@
+ async function rescan() {
+   const b = el('btnRescan');
+   b.disabled = true; const t = b.textContent; b.textContent = 'Scanning…';
+-  await scan();
++  await scan(true);
+   b.disabled = false; b.textContent = t;
+   toast('Hardware rescanned', 'ok');
+ }

@@ -1,0 +1,39 @@
+# Builds daksha.exe and the Windows installer on GitHub's Windows servers.
+# Run it from the repo's Actions tab ("Build Windows" -> "Run workflow"), or push to main.
+# Download the result from the run's "Artifacts" section.
+name: Build Windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    defaults:
+      run:
+        working-directory: flutter/flutter_linux_browser
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.35.4
+          channel: stable
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build
+        run: powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: daksha-windows-portable
+          path: flutter/flutter_linux_browser/build/windows/x64/runner/Release/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: daksha-windows-installer
+          path: flutter/flutter_linux_browser/build/windows-installer/*.exe

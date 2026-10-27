@@ -1,0 +1,58 @@
+--- a/static/js/app.js
++++ b/static/js/app.js
+@@ -3,6 +3,13 @@
+ 
+ let DEVICES = [];                 // [{serial,name,usb,status,detail}]
+ let ASSIGN = {};                  // role_key -> serial|null
++let SAVED = {};                   // role_key -> serial|null in cameras.yaml
++let LAST_SCAN = {};               // last /api/scan reply
++
++function takeScan(data) {
++  LAST_SCAN = data;
++  SAVED = data.saved || {};
++}
+ 
+ const el = (id) => document.getElementById(id);
+ const streamURL = (serial) => `/stream/${serial}?t=${Date.now()}`;
+@@ -110,6 +117,17 @@
+       img.dataset.serial = '';
+       serialEl.textContent = '';
+     }
++    // The slots show the unsaved draft; say when cameras.yaml still differs.
++    const saved = SAVED[r.key] || null;
++    let pending = slot.querySelector('.slot-pending');
++    if (!pending) {
++      pending = document.createElement('div');
++      pending.className = 'slot-pending';
++      pending.style.cssText = 'font-size:11px; color:#b45309; margin-top:2px';
++      serialEl.after(pending);
++    }
++    pending.hidden = !('saved' in LAST_SCAN) || saved === (serial || null);
++    pending.textContent = `cameras.yaml has ${saved || 'none'}: press Save to write this change`;
+   }
+ }
+ 
+@@ -152,6 +170,7 @@
+   try {
+     const res = await fetch('/api/scan');
+     const data = await res.json();
++    takeScan(data);
+     DEVICES = data.devices || [];
+     ASSIGN = data.assignments || {};
+     const note = el('note');
+@@ -182,6 +201,7 @@
+     else {
+       const n = (data.written || []).length;
+       toast(`Saved ${(data.changed || []).join(', ')} to ${n} file${n === 1 ? '' : 's'} (src + install)`, 'ok');
++      await scan();   // refresh what cameras.yaml now holds
+     }
+   } catch (e) { toast('save failed: ' + e, 'err'); }
+   finally { b.disabled = false; b.textContent = t; }
+@@ -196,6 +216,7 @@
+   try {
+     const res = await fetch('/api/scan');
+     const data = await res.json();
++    takeScan(data);
+     DEVICES = data.devices || [];
+     ASSIGN = data.assignments || ASSIGN;
+     renderDevices();

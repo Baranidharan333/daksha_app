@@ -1,0 +1,24 @@
+# systemd unit for the Daksha gateway on a robot.
+# Install: sudo cp -r gateway /opt/daksha-gateway && sudo cp daksha-gateway.service /etc/systemd/system/
+#          sudo systemctl daemon-reload && sudo systemctl enable --now daksha-gateway
+[Unit]
+Description=Daksha gateway (app-only access to the robot web UI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/opt/daksha-gateway
+# Holds SESSION_SECRET, APP_LAUNCH_KEY, UPSTREAM_URL, ... (chmod 600, owned by root).
+EnvironmentFile=/opt/daksha-gateway/.env
+# Port 8100 on the dashboard robot; use 8000 on the navigation base.
+# One worker: tickets and sessions are kept in this process's memory.
+ExecStart=/opt/daksha-gateway/.venv/bin/uvicorn app:app --host 0.0.0.0 --port 8100 --workers 1 --no-server-header
+Restart=on-failure
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

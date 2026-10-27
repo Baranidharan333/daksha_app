@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Demo Logs</title>
+  <script src="/static/daksha-config.js"></script>
+  <script src="/static/daksha-session.js"></script>
+  <style>
+    body { font-family: ui-monospace, monospace; background: #0b1020; color: #e6e9f2; margin: 0; padding: 16px; }
+  </style>
+</head>
+<body>
+  <pre id="out"></pre>
+  <script>
+    var out = document.getElementById('out');
+    var source = new EventSource('/api/logs/stream');
+    source.onmessage = function (e) { out.textContent += e.data + '\n'; };
+  </script>
+</body>
+</html>
